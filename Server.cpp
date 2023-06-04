@@ -14,18 +14,42 @@ using namespace std;
 
 HANDLE mutex{};
 
+static bool exitThread{ false };
+
+enum class Task
+{
+    Multiply,
+    Divide,
+    Pow,
+    Disconnect
+};
+
+struct TaskData
+{
+    double a{};
+    double b{};
+    Task task{};
+};
+
 struct ClientData
 {
-    float cpuUsage{};
-    int freeMemSpace{};
+    int cpuUsage{};
+    double freeMemSpace{};
     double data{};
+};
+
+struct Client
+{
+    ClientData clientData{};
+    bool received{};
+    bool busy{ false };
 };
 
 struct ReadClientDataParams
 {
     SOCKET listenSocket{};
     fd_set* readfds{};
-    map<SOCKET, ClientData>* connectedClients{};
+    map<SOCKET, Client>* connectedClients{};
 };
 
 SOCKET generateSocket(PCSTR port)
@@ -98,7 +122,7 @@ SOCKET generateSocket(PCSTR port)
     return listenSocket;
 }
 
-SOCKET establishConnection(SOCKET socket, fd_set* readfds, map<SOCKET, ClientData>* connectedClients)
+SOCKET establishConnection(SOCKET socket, fd_set* readfds, map<SOCKET, Client>* connectedClients)
 {
     SOCKET ClientSocket{ INVALID_SOCKET };
 
@@ -120,7 +144,7 @@ SOCKET establishConnection(SOCKET socket, fd_set* readfds, map<SOCKET, ClientDat
 
     if (connectedClients->find(ClientSocket) == connectedClients->end())
     {
-        (*connectedClients)[ClientSocket] = ClientData();
+        (*connectedClients)[ClientSocket] = Client();
     }
 
     return ClientSocket;
@@ -139,7 +163,7 @@ void shutdownSocket(SOCKET socket)
     WSACleanup();
 }
 
-SOCKET getMaxSocket(SOCKET listenSocket, map<SOCKET, ClientData>* connectedClients)
+SOCKET getMaxSocket(SOCKET listenSocket, map<SOCKET, Client>* connectedClients)
 {
     SOCKET max_sd{};
 
@@ -148,7 +172,7 @@ SOCKET getMaxSocket(SOCKET listenSocket, map<SOCKET, ClientData>* connectedClien
         return listenSocket;
     }
 
-    for(pair<SOCKET, ClientData> connectedClient : *connectedClients)
+    for(pair<SOCKET, Client> connectedClient : *connectedClients)
     {
         if (connectedClient.first > max_sd)
         {
@@ -165,11 +189,12 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
     int  activity{};
     ClientData clientData{};
     DWORD waitResult{};
-    int iter{};
+    timeval time{};
+    time.tv_sec = 5;
 
-    while (iter < 1)
+    while (!exitThread)
     {
-        waitResult = WaitForSingleObject(mutex, 20);
+        waitResult = WaitForSingleObject(mutex, INFINITE);
 
         switch (waitResult)
         {
@@ -186,20 +211,20 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
                         FD_SET(client.first, params.readfds);
                     }
                 }
+
+                activity = select(getMaxSocket(params.listenSocket, params.connectedClients), params.readfds, NULL, NULL, &time);
+
+                if ((activity < 0) && (errno != EINTR))
+                {
+                    cerr << "select() error" << endl;
+
+                    ReleaseMutex(mutex);
+
+                    continue;
+                }
             
                 if (FD_ISSET(params.listenSocket, params.readfds))
                 {
-                    activity = select(getMaxSocket(params.listenSocket, params.connectedClients), params.readfds, NULL, NULL, NULL);
-
-                    if ((activity < 0) && (errno != EINTR))
-                    {
-                        cerr << "select() error" << endl;
-
-                        ReleaseMutex(mutex);
-
-                        continue;
-                    }
-
                     SOCKET clientSocket{ establishConnection(params.listenSocket, params.readfds, params.connectedClients) };
 
                     if (clientSocket == -1)
@@ -219,7 +244,8 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
                     {
                         memcpy(&clientData, messageChunk, sizeof(ClientData));
 
-                        (*params.connectedClients)[clientSocket] = clientData;
+                        (*params.connectedClients)[clientSocket].clientData = clientData;
+                        (*params.connectedClients)[clientSocket].received = true;
                     }
                     else
                     {
@@ -235,8 +261,15 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
                 break;
         }
 
-        iter++;
+        if (exitThread)
+        {
+            ReleaseMutex(mutex);
+
+            break;
+        }
     }
+
+    cout << "cl end" << endl;
 
     return 0;
 }
@@ -246,7 +279,7 @@ DWORD WINAPI receiveMessage(LPVOID lpParams)
     ReadClientDataParams params{ *(ReadClientDataParams*)lpParams };
     DWORD waitResult{};
 
-    while (true)
+    while (!exitThread)
     {
         waitResult = WaitForSingleObject(mutex, INFINITE);
 
@@ -256,29 +289,30 @@ DWORD WINAPI receiveMessage(LPVOID lpParams)
 
                 vector<SOCKET> clientsToErase{};
 
-                cout << "receiveMessage" << endl;
-
-                for (pair<SOCKET, ClientData> client : *params.connectedClients)
+                for (map<SOCKET, Client>::iterator client{ params.connectedClients->begin() }; client != params.connectedClients->end(); client++)
                 {
-                    if (FD_ISSET(client.first, params.readfds))
+                    if (FD_ISSET(client->first, params.readfds))
                     {
-                        string message{};
+                        char message[DEFAULT_BUFLEN]{};
 
-                        char messageChunk[DEFAULT_BUFLEN]{};
+                        int size = recv(client->first, message, DEFAULT_BUFLEN - 1, 0);
 
-                        int size = recv(client.first, messageChunk, DEFAULT_BUFLEN - 1, 0);
-
-                        message.append(messageChunk);
-
-                        if (message == "DISCONNECT")
+                        if (size <= 0)
                         {
-                            shutdownSocket(client.first);
+                            closesocket(client->first);
 
-                            clientsToErase.push_back(client.first);
+                            clientsToErase.push_back(client->first);
 
-                            FD_CLR(client.first, params.readfds);
+                            FD_CLR(client->first, params.readfds);
+                        }
+                        else if (size == sizeof(ClientData))
+                        {
+                            ClientData clientData{};
 
-                            cout << "Received: " << message << endl;
+                            memcpy(&clientData, message, size);
+
+                            client->second.clientData = clientData;
+                            client->second.received = true;
                         }
                     }
                 }
@@ -294,12 +328,21 @@ DWORD WINAPI receiveMessage(LPVOID lpParams)
 
                 break;
         }
+
+        if (exitThread)
+        {
+            ReleaseMutex(mutex);
+
+            break;
+        }
     }
+    
+    cout << "recv end" << endl;
 
     return 0;
 }
 
-void sendMessage(SOCKET clientSocket, const char* sendBuf, int size, fd_set* readfds, map<SOCKET, ClientData>* connectedClients)
+void sendMessage(SOCKET clientSocket, const char* sendBuf, int size, fd_set* readfds, map<SOCKET, Client>* connectedClients)
 {
     int iResult{ send(clientSocket, sendBuf, size, 0) };
 
@@ -316,6 +359,125 @@ void sendMessage(SOCKET clientSocket, const char* sendBuf, int size, fd_set* rea
         return;
     }
 }
+
+SOCKET chooseBestClient(map<SOCKET, Client>* connectedClients)
+{
+    while (connectedClients->size() == 0)
+    {
+        if (connectedClients->size())
+        {
+            break;
+        }
+    }
+
+    double clientScore{};
+    SOCKET clientSocket{};
+
+    while (clientScore == 0)
+    {
+        for (auto& connectedClient : *connectedClients)
+        {
+            if (!connectedClient.second.busy)
+            {
+                double newClientScore{ (100.0 - connectedClient.second.clientData.cpuUsage) * connectedClient.second.clientData.freeMemSpace };
+
+                if (newClientScore > clientScore)
+                {
+                    clientScore = newClientScore;
+                    clientSocket = connectedClient.first;
+                }
+            }
+        }
+
+        if (clientScore)
+        {
+            break;
+        }
+    }
+
+    return clientSocket;
+}
+
+#pragma region Tasks
+
+double firstTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
+{
+    double a{ 5.5 }, b{ -10 }, c{ 200.3 }, d{ 161 };
+
+    SOCKET client{ chooseBestClient(connectedClients) };
+
+    (*connectedClients)[client].busy = true;
+    (*connectedClients)[client].received = false;
+
+    TaskData taskData{};
+
+    taskData.a = a;
+    taskData.b = b;
+    taskData.task = Task::Multiply;
+
+    sendMessage(client, (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
+
+    cout << "sent" << endl;
+ 
+    while (true)
+    {
+        if ((*connectedClients)[client].received == true)
+        {
+            break;
+        }
+    }
+
+    (*connectedClients)[client].busy = false;
+    (*connectedClients)[client].received = false;
+
+    exitThread = true;
+
+    return (*connectedClients)[client].clientData.data;
+}
+
+double secondTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
+{
+    double a{ 5.5 }, b{ -10 }, c{ 200.3 }, d{ 161 };
+
+    SOCKET clients[2]{};
+
+    for (int i{}; i < 2; i++)
+    {
+        clients[i] = chooseBestClient(connectedClients);
+
+        (*connectedClients)[clients[i]].busy = true;
+        (*connectedClients)[clients[i]].received = false;
+    }
+
+    TaskData taskData{};
+
+    taskData.a = a;
+    taskData.b = b;
+    taskData.task = Task::Multiply;
+
+    sendMessage(clients[0], (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
+
+    taskData.a = c;
+    taskData.b = d;
+    taskData.task = Task::Pow;
+
+    sendMessage(clients[1], (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
+
+    while (true)
+    {
+        if ((*connectedClients)[clients[0]].received == true &&
+            (*connectedClients)[clients[1]].received == true)
+        {
+            break;
+        }
+    }
+
+    exitThread = true;
+
+    return (*connectedClients)[clients[0]].clientData.data + (*connectedClients)[clients[1]].clientData.data;
+}
+
+#pragma endregion
 
 int main()
 {
@@ -357,7 +519,7 @@ int main()
 
     vector<int> clientSockets{};
 
-    map<SOCKET, ClientData> connectedClients{};
+    map<SOCKET, Client> connectedClients{};
 
     ReadClientDataParams readClientDataParams{};
 
@@ -413,6 +575,8 @@ int main()
         WSACleanup();
     }
 
+    cout << "Result: " << firstTask(&readfds, &connectedClients);
+
     WaitForSingleObject(connectNewClientThread, INFINITE);
     WaitForSingleObject(receiveMessageThread, INFINITE);
 
@@ -420,6 +584,12 @@ int main()
 
     for (auto client : connectedClients)
     {
+        TaskData taskData{};
+
+        taskData.task = Task::Disconnect;
+
+        sendMessage(client.first, (char*)& taskData, sizeof(TaskData), &readfds, &connectedClients);
+
         closesocket(client.first);
     }
 
