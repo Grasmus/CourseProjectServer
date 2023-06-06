@@ -190,7 +190,7 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
     ClientData clientData{};
     DWORD waitResult{};
     timeval time{};
-    time.tv_sec = 5;
+    time.tv_sec = 1;
 
     while (!exitThread)
     {
@@ -244,8 +244,12 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
                     {
                         memcpy(&clientData, messageChunk, sizeof(ClientData));
 
-                        (*params.connectedClients)[clientSocket].clientData = clientData;
-                        (*params.connectedClients)[clientSocket].received = true;
+                        Client client{};
+
+                        client.busy = false;
+                        client.clientData = clientData;
+
+                        (*params.connectedClients)[clientSocket] = client;
                     }
                     else
                     {
@@ -268,8 +272,6 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
             break;
         }
     }
-
-    cout << "cl end" << endl;
 
     return 0;
 }
@@ -336,8 +338,6 @@ DWORD WINAPI receiveMessage(LPVOID lpParams)
             break;
         }
     }
-    
-    cout << "recv end" << endl;
 
     return 0;
 }
@@ -373,23 +373,31 @@ SOCKET chooseBestClient(map<SOCKET, Client>* connectedClients)
     double clientScore{};
     SOCKET clientSocket{};
 
-    while (clientScore == 0)
+    bool newClientScoreApplied{ false };
+
+    map<SOCKET, Client> connectedClientsData{ *connectedClients };
+
+    while (!newClientScoreApplied)
     {
-        for (auto& connectedClient : *connectedClients)
+        connectedClientsData = *connectedClients;
+
+        for (auto& connectedClient : connectedClientsData)
         {
             if (!connectedClient.second.busy)
             {
                 double newClientScore{ (100.0 - connectedClient.second.clientData.cpuUsage) * connectedClient.second.clientData.freeMemSpace };
 
-                if (newClientScore > clientScore)
+                if (newClientScore >= clientScore)
                 {
                     clientScore = newClientScore;
                     clientSocket = connectedClient.first;
+
+                    newClientScoreApplied = true;
                 }
             }
         }
 
-        if (clientScore)
+        if (newClientScoreApplied)
         {
             break;
         }
@@ -416,8 +424,6 @@ double firstTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
     taskData.task = Task::Multiply;
 
     sendMessage(client, (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
-
-    cout << "sent" << endl;
  
     while (true)
     {
@@ -582,7 +588,7 @@ int main()
 
     FD_ZERO(&readfds);
 
-    for (auto client : connectedClients)
+    for (auto& client : connectedClients)
     {
         TaskData taskData{};
 
