@@ -59,7 +59,7 @@ SOCKET generateSocket(PCSTR port)
     hints.ai_family = AF_UNSPEC;
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = 0;
+    hints.ai_flags = AI_PASSIVE;
     hints.ai_addr = NULL;
     hints.ai_canonname = NULL;
     hints.ai_next = NULL;
@@ -142,11 +142,6 @@ SOCKET establishConnection(SOCKET socket, fd_set* readfds, map<SOCKET, Client>* 
         FD_SET(ClientSocket, readfds);
     }
 
-    if (connectedClients->find(ClientSocket) == connectedClients->end())
-    {
-        (*connectedClients)[ClientSocket] = Client();
-    }
-
     return ClientSocket;
 }
 
@@ -172,7 +167,9 @@ SOCKET getMaxSocket(SOCKET listenSocket, map<SOCKET, Client>* connectedClients)
         return listenSocket;
     }
 
-    for(pair<SOCKET, Client> connectedClient : *connectedClients)
+    map<SOCKET, Client> connectedClientsData{ *connectedClients };
+
+    for(auto& connectedClient : connectedClientsData)
     {
         if (connectedClient.first > max_sd)
         {
@@ -192,6 +189,8 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
     timeval time{};
     time.tv_sec = 1;
 
+    auto connectedClientsData{ *params.connectedClients };
+
     while (!exitThread)
     {
         waitResult = WaitForSingleObject(mutex, INFINITE);
@@ -204,7 +203,7 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
 
                 FD_SET(params.listenSocket, params.readfds);
 
-                for (auto client : *params.connectedClients)
+                for (auto& client : connectedClientsData)
                 {
                     if (client.first > 0)
                     {
@@ -212,7 +211,7 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
                     }
                 }
 
-                activity = select(getMaxSocket(params.listenSocket, params.connectedClients), params.readfds, NULL, NULL, &time);
+                activity = select(getMaxSocket(params.listenSocket, params.connectedClients) + 1, params.readfds, NULL, NULL, &time);
 
                 if ((activity < 0) && (errno != EINTR))
                 {
@@ -236,9 +235,22 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
                         continue;
                     }
 
+                    if (connectedClientsData.find(clientSocket) != connectedClientsData.end())
+                    {
+                        cerr << "Client already exists" << endl;
+
+                        ReleaseMutex(mutex);
+
+                        continue;
+                    }
+
                     char messageChunk[DEFAULT_BUFLEN]{};
 
+                    cout << "Client socket: " << clientSocket << endl;
+
                     int size = recv(clientSocket, messageChunk, DEFAULT_BUFLEN - 1, 0);
+
+                    cout << "connectNewClient size: " << size << endl;
 
                     if (size == sizeof(ClientData))
                     {
@@ -250,6 +262,8 @@ DWORD WINAPI connectNewClient(LPVOID lpParams)
                         client.clientData = clientData;
 
                         (*params.connectedClients)[clientSocket] = client;
+
+                        cout << "connectNewClient: " << clientData.data << endl;
                     }
                     else
                     {
@@ -280,6 +294,11 @@ DWORD WINAPI receiveMessage(LPVOID lpParams)
 {
     ReadClientDataParams params{ *(ReadClientDataParams*)lpParams };
     DWORD waitResult{};
+    int activity{};
+    timeval time{};
+    time.tv_sec = 1;
+
+    auto connectedClientsData{ *params.connectedClients };
 
     while (!exitThread)
     {
@@ -289,6 +308,31 @@ DWORD WINAPI receiveMessage(LPVOID lpParams)
         {
             case WAIT_OBJECT_0:
 
+                FD_ZERO(params.readfds);
+
+                FD_SET(params.listenSocket, params.readfds);
+
+                connectedClientsData = *params.connectedClients;
+
+                for (auto& client : connectedClientsData)
+                {
+                    if (client.first > 0)
+                    {
+                        FD_SET(client.first, params.readfds);
+                    }
+                }
+
+                activity = select(getMaxSocket(params.listenSocket, params.connectedClients) + 1, params.readfds, NULL, NULL, &time);
+
+                if ((activity < 0) && (errno != EINTR))
+                {
+                    cerr << "select() error" << endl;
+
+                    ReleaseMutex(mutex);
+
+                    continue;
+                }
+
                 vector<SOCKET> clientsToErase{};
 
                 for (map<SOCKET, Client>::iterator client{ params.connectedClients->begin() }; client != params.connectedClients->end(); client++)
@@ -297,7 +341,11 @@ DWORD WINAPI receiveMessage(LPVOID lpParams)
                     {
                         char message[DEFAULT_BUFLEN]{};
 
+                        cout << "receiveMessage start: " << client->first << endl;
+
                         int size = recv(client->first, message, DEFAULT_BUFLEN - 1, 0);
+
+                        cout << "receiveMessage end" << endl;
 
                         if (size <= 0)
                         {
@@ -315,6 +363,8 @@ DWORD WINAPI receiveMessage(LPVOID lpParams)
 
                             client->second.clientData = clientData;
                             client->second.received = true;
+
+                            cout << "received: " << clientData.data << endl;
                         }
                     }
                 }
@@ -465,7 +515,7 @@ double secondTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
 
     taskData.a = c;
     taskData.b = d;
-    taskData.task = Task::Pow;
+    taskData.task = Task::Divide;
 
     sendMessage(clients[1], (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
 
@@ -481,6 +531,57 @@ double secondTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
     exitThread = true;
 
     return (*connectedClients)[clients[0]].clientData.data + (*connectedClients)[clients[1]].clientData.data;
+}
+
+double thirdTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
+{
+    double a{ 5.5 }, b{ -10 }, c{ 200.3 }, d{ 161 }, e{ 2 }, f{ 5 };
+
+    SOCKET clients[3]{};
+
+    for (int i{}; i < 3; i++)
+    {
+        clients[i] = chooseBestClient(connectedClients);
+
+        (*connectedClients)[clients[i]].busy = true;
+        (*connectedClients)[clients[i]].received = false;
+    }
+
+    TaskData taskData{};
+
+    taskData.a = a;
+    taskData.b = b;
+    taskData.task = Task::Multiply;
+
+    sendMessage(clients[0], (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
+
+    taskData.a = c;
+    taskData.b = d;
+    taskData.task = Task::Divide;
+
+    sendMessage(clients[1], (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
+
+    taskData.a = e;
+    taskData.b = f;
+    taskData.task = Task::Pow;
+
+    sendMessage(clients[2], (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
+
+    while (true)
+    {
+        if ((*connectedClients)[clients[0]].received == true &&
+            (*connectedClients)[clients[1]].received == true &&
+            (*connectedClients)[clients[2]].received)
+        {
+            break;
+        }
+    }
+
+    exitThread = true;
+
+    return (*connectedClients)[clients[0]].clientData.data + 
+        (*connectedClients)[clients[1]].clientData.data + 
+        (*connectedClients)[clients[2]].clientData.data;
 }
 
 #pragma endregion
@@ -581,12 +682,10 @@ int main()
         WSACleanup();
     }
 
-    cout << "Result: " << firstTask(&readfds, &connectedClients);
+    cout << "Result: " << thirdTask(&readfds, &connectedClients);
 
     WaitForSingleObject(connectNewClientThread, INFINITE);
     WaitForSingleObject(receiveMessageThread, INFINITE);
-
-    FD_ZERO(&readfds);
 
     for (auto& client : connectedClients)
     {
@@ -598,6 +697,8 @@ int main()
 
         closesocket(client.first);
     }
+
+    FD_ZERO(&readfds);
 
     closesocket(listenSocket);
 
