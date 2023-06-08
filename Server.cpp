@@ -688,9 +688,9 @@ int main()
         WSACleanup();
     }
 
-    cout << "First task result: " << firstTask(&readfds, &connectedClients);
-    cout << "Second task result: " << secondTask(&readfds, &connectedClients);
-    cout << "Third task result: " << thirdTask(&readfds, &connectedClients);
+    cout << "First task result: " << firstTask(&readfds, &connectedClients) << endl;
+    cout << "Second task result: " << secondTask(&readfds, &connectedClients) << endl;
+    cout << "Third task result: " << thirdTask(&readfds, &connectedClients) << endl;
 
     exitThread = true;
 
