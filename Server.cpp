@@ -167,7 +167,7 @@ SOCKET getMaxSocket(SOCKET listenSocket, map<SOCKET, Client>* connectedClients)
         return listenSocket;
     }
 
-    map<SOCKET, Client> connectedClientsData{ *connectedClients };
+    map<SOCKET, Client>& connectedClientsData{ *connectedClients };
 
     for(auto& connectedClient : connectedClientsData)
     {
@@ -425,7 +425,7 @@ SOCKET chooseBestClient(map<SOCKET, Client>* connectedClients)
 
     bool newClientScoreApplied{ false };
 
-    map<SOCKET, Client> connectedClientsData{ *connectedClients };
+    map<SOCKET, Client>& connectedClientsData{ *connectedClients };
 
     while (!newClientScoreApplied)
     {
@@ -460,7 +460,7 @@ SOCKET chooseBestClient(map<SOCKET, Client>* connectedClients)
 
 double firstTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
 {
-    double a{ 5.5 }, b{ -10 }, c{ 200.3 }, d{ 161 };
+    double a{ 5.5 }, b{ -10 };
 
     SOCKET client{ chooseBestClient(connectedClients) };
 
@@ -477,7 +477,7 @@ double firstTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
  
     while (true)
     {
-        if ((*connectedClients)[client].received == true)
+        if ((*connectedClients)[client].received)
         {
             break;
         }
@@ -486,14 +486,12 @@ double firstTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
     (*connectedClients)[client].busy = false;
     (*connectedClients)[client].received = false;
 
-    exitThread = true;
-
     return (*connectedClients)[client].clientData.data;
 }
 
 double secondTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
 {
-    double a{ 5.5 }, b{ -10 }, c{ 200.3 }, d{ 161 };
+    double a{ 72.9 }, b{ 84 }, c{ -150 }, d{ 33 };
 
     SOCKET clients[2]{};
 
@@ -521,21 +519,25 @@ double secondTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
 
     while (true)
     {
-        if ((*connectedClients)[clients[0]].received == true &&
-            (*connectedClients)[clients[1]].received == true)
+        if ((*connectedClients)[clients[0]].received &&
+            (*connectedClients)[clients[1]].received)
         {
             break;
         }
     }
 
-    exitThread = true;
+    for (int i{}; i < 2; i++)
+    {
+        (*connectedClients)[clients[i]].received = false;
+        (*connectedClients)[clients[i]].busy = false;
+    }
 
     return (*connectedClients)[clients[0]].clientData.data + (*connectedClients)[clients[1]].clientData.data;
 }
 
 double thirdTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
 {
-    double a{ 5.5 }, b{ -10 }, c{ 200.3 }, d{ 161 }, e{ 2 }, f{ 5 };
+    double a{ -12.5 }, b{ -99 }, c{ 200.3 }, d{ 161 }, e{ 2 }, f{ 5 };
 
     SOCKET clients[3]{};
 
@@ -551,13 +553,13 @@ double thirdTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
 
     taskData.a = a;
     taskData.b = b;
-    taskData.task = Task::Multiply;
+    taskData.task = Task::Divide;
 
     sendMessage(clients[0], (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
 
     taskData.a = c;
     taskData.b = d;
-    taskData.task = Task::Divide;
+    taskData.task = Task::Multiply;
 
     sendMessage(clients[1], (char*)&taskData, sizeof(TaskData), readfds, connectedClients);
 
@@ -569,15 +571,19 @@ double thirdTask(fd_set* readfds, map<SOCKET, Client>* connectedClients)
 
     while (true)
     {
-        if ((*connectedClients)[clients[0]].received == true &&
-            (*connectedClients)[clients[1]].received == true &&
+        if ((*connectedClients)[clients[0]].received &&
+            (*connectedClients)[clients[1]].received &&
             (*connectedClients)[clients[2]].received)
         {
             break;
         }
     }
 
-    exitThread = true;
+    for (int i{}; i < 3; i++)
+    {
+        (*connectedClients)[clients[i]].received = false;
+        (*connectedClients)[clients[i]].busy = false;
+    }
 
     return (*connectedClients)[clients[0]].clientData.data + 
         (*connectedClients)[clients[1]].clientData.data + 
@@ -682,7 +688,11 @@ int main()
         WSACleanup();
     }
 
-    cout << "Result: " << thirdTask(&readfds, &connectedClients);
+    cout << "First task result: " << firstTask(&readfds, &connectedClients);
+    cout << "Second task result: " << secondTask(&readfds, &connectedClients);
+    cout << "Third task result: " << thirdTask(&readfds, &connectedClients);
+
+    exitThread = true;
 
     WaitForSingleObject(connectNewClientThread, INFINITE);
     WaitForSingleObject(receiveMessageThread, INFINITE);
